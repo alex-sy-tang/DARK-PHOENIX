@@ -14,8 +14,9 @@ pandas
 transformers
 accelerate
 datasets
+pyarrow
 google-genai
 pysubs2
 boto3
 fastapi[standard]
-pyannote-audio==3.1.1
+whisperx>=3.8.0
