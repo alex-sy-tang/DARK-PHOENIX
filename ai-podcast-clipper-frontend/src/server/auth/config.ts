@@ -63,6 +63,7 @@ export const authConfig = {
     }),
   ],
   session: { strategy: "jwt" },
+  // trustHost: true, // uncomment for local `npm run start` testing; Vercel sets this automatically via VERCEL env var
   adapter: PrismaAdapter(db),
   callbacks: {
     session: ({ session, token }) => ({
