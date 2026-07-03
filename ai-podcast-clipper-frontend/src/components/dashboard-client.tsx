@@ -13,10 +13,12 @@ import {
   CardTitle,
 } from "./ui/card";
 import { Loader2, UploadCloud } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { generateUploadUrl } from "~/actions/s3";
 import { toast } from "sonner";
 import { processVideo } from "~/actions/generation";
+import { createYoutubeUploadJob } from "~/actions/youtube";
+import { Input } from "./ui/input";
 import {
   Table,
   TableBody,
@@ -46,12 +48,54 @@ export function DashboardClient({
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [submittingYoutube, setSubmittingYoutube] = useState(false);
   const router = useRouter();
 
   const handleRefresh = async () => {
     setRefreshing(true);
     router.refresh();
     setTimeout(() => setRefreshing(false), 600);
+  };
+
+  const hasInProgressJob = uploadedFiles.some((item) =>
+    ["downloading", "queued", "processing"].includes(item.status),
+  );
+
+  // Poll for status updates while any job is still in flight.
+  useEffect(() => {
+    if (!hasInProgressJob) return;
+    const interval = setInterval(() => router.refresh(), 4000);
+    return () => clearInterval(interval);
+  }, [hasInProgressJob, router]);
+
+  const handleYoutubeSubmit = async () => {
+    if (!youtubeUrl.trim()) return;
+    setSubmittingYoutube(true);
+
+    try {
+      const result = await createYoutubeUploadJob(youtubeUrl.trim());
+
+      if (!result.success) {
+        throw new Error(result.error ?? "Failed to start YouTube download");
+      }
+
+      setYoutubeUrl("");
+      router.refresh();
+
+      toast.success("YouTube video queued", {
+        description:
+          "Downloading the video on the server. Check the status below.",
+        duration: 5000,
+      });
+    } catch (error) {
+      toast.error("Failed to queue YouTube video", {
+        description:
+          error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setSubmittingYoutube(false);
+    }
   };
 
   const handleDrop = (acceptedFiles: File[]) => {
@@ -161,7 +205,33 @@ export function DashboardClient({
                 )}
               </Dropzone>
 
-              <div className="mt-2 flex items-start justify-between">
+              <div className="mt-6 flex items-end gap-2 border-t pt-6">
+                <div className="flex-1 space-y-1.5">
+                  <p className="text-sm font-medium">Or paste a YouTube URL</p>
+                  <Input
+                    type="url"
+                    placeholder="https://www.youtube.com/watch?v=..."
+                    value={youtubeUrl}
+                    onChange={(e) => setYoutubeUrl(e.target.value)}
+                    disabled={submittingYoutube}
+                  />
+                </div>
+                <Button
+                  disabled={!youtubeUrl.trim() || submittingYoutube}
+                  onClick={handleYoutubeSubmit}
+                >
+                  {submittingYoutube ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Queuing...
+                    </>
+                  ) : (
+                    "Fetch and Generate Clips"
+                  )}
+                </Button>
+              </div>
+
+              <div className="mt-6 flex items-start justify-between">
                 <div>
                   {files.length > 0 && (
                     <div className="space-y-1 text-sm">
@@ -225,6 +295,17 @@ export function DashboardClient({
                               {new Date(item.createdAt).toLocaleDateString()}
                             </TableCell>
                             <TableCell>
+                              {item.status === "downloading" && (
+                                <Badge variant="outline">
+                                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                  Downloading
+                                </Badge>
+                              )}
+                              {item.status === "download_failed" && (
+                                <Badge variant="destructive">
+                                  Download failed
+                                </Badge>
+                              )}
                               {item.status === "queued" && (
                                 <Badge variant="outline">Queued</Badge>
                               )}

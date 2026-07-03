@@ -1,9 +1,11 @@
-"use server";
-
 import { redirect } from "next/navigation";
 import { DashboardClient } from "~/components/dashboard-client";
 import { auth } from "~/server/auth";
 import { db } from "~/server/db";
+
+// The YouTube ingestion action on this page runs a background download
+// (via next/server's after()) that can take well past a typical request.
+export const maxDuration = 800;
 
 export default async function DashboardPage() {
   const session = await auth();

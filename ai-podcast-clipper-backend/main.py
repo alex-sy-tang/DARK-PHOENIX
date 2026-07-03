@@ -22,6 +22,9 @@ from tqdm import tqdm
 import whisperx
 
 
+import youtube_download
+
+
 class ProcessVideoRequest(BaseModel):
     s3_key: str
 
@@ -44,6 +47,7 @@ image = (modal.Image.from_registry(
     .add_local_dir("asd", "/asd", copy=True))
 
 app = modal.App("ai-podcast-clipper", image=image)
+app.include(youtube_download.app)
 
 volume = modal.Volume.from_name(
     "ai-podcast-clipper-model-cache", create_if_missing=True
