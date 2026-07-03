@@ -65,6 +65,12 @@ def download_youtube_video(request: YoutubeDownloadRequest, token: HTTPAuthoriza
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
+            "retries": 5,
+            "fragment_retries": 5,
+            # The default "web" client issues time/signature-limited URLs that
+            # can 403 mid-download. Try several alternate clients, roughly in
+            # order of how likely they are to dodge cloud-IP bot detection.
+            "extractor_args": {"youtube": {"player_client": ["tv", "web_embedded", "android", "web"]}},
         }
 
         title = None

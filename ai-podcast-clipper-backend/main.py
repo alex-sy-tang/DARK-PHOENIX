@@ -44,7 +44,13 @@ image = (modal.Image.from_registry(
         "wget -O /usr/share/fonts/truetype/custom/Anton-Regular.ttf https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf",
         "fc-cache -f -v",
     ])
-    .add_local_dir("asd", "/asd", copy=True))
+    .add_local_dir("asd", "/asd", copy=True)
+    # main.py does `import youtube_download` at module scope (needed for
+    # app.include() below), and Modal re-imports main.py inside every
+    # container. Using copy=True above disables Modal's automatic mounting
+    # of sibling local files, so youtube_download.py must be added
+    # explicitly or the GPU container crashes with ModuleNotFoundError.
+    .add_local_file("youtube_download.py", "/root/youtube_download.py", copy=True))
 
 app = modal.App("ai-podcast-clipper", image=image)
 app.include(youtube_download.app)
