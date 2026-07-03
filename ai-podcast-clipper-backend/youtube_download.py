@@ -1,7 +1,6 @@
 import os
 import pathlib
 import shutil
-import subprocess
 import uuid
 
 import modal
@@ -15,6 +14,13 @@ from pydantic import BaseModel
 # container -- so a function sharing main.py's module would crash-loop when
 # started under this lightweight image. app.include() in main.py merges this
 # App's functions into the deployed app under one `modal deploy`.
+#
+# Uses yt-dlp rather than pytubefix: pytubefix hit YouTube's bot detection
+# (pytubefix.exceptions.BotDetection) on the assigned video. yt-dlp is
+# updated far more frequently to counter YouTube's anti-bot changes and also
+# merges video+audio itself, so no separate ffmpeg merge step is needed.
+
+MAX_FILESIZE_BYTES = 500 * 1024 * 1024  # matches the frontend's file-upload cap
 
 
 class YoutubeDownloadRequest(BaseModel):
@@ -25,7 +31,7 @@ class YoutubeDownloadRequest(BaseModel):
 downloader_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg")
-    .pip_install("pytubefix", "boto3", "fastapi[standard]")
+    .pip_install("yt-dlp", "boto3", "fastapi[standard]")
 )
 
 app = modal.App("ai-podcast-clipper-youtube-download", image=downloader_image)
@@ -40,7 +46,7 @@ auth_scheme = HTTPBearer()
 @modal.fastapi_endpoint(method="POST")
 def download_youtube_video(request: YoutubeDownloadRequest, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
     import boto3
-    from pytubefix import YouTube
+    import yt_dlp
 
     if token.credentials != os.environ["AUTH_TOKEN"]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
@@ -51,35 +57,30 @@ def download_youtube_video(request: YoutubeDownloadRequest, token: HTTPAuthoriza
     base_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        ydl_opts = {
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "outtmpl": str(base_dir / "original.%(ext)s"),
+            "merge_output_format": "mp4",
+            "max_filesize": MAX_FILESIZE_BYTES,
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+        title = None
         try:
-            yt = YouTube(request.youtube_url)
-        except Exception as e:
-            raise HTTPException(status_code=422, detail=f"Invalid or unreachable YouTube URL: {e}")
-
-        video_stream = yt.streams.filter(
-            only_video=True, file_extension="mp4").order_by("resolution").desc().first()
-        audio_stream = yt.streams.filter(
-            only_audio=True, file_extension="mp4").order_by("abr").desc().first()
-
-        if video_stream is None or audio_stream is None:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(request.youtube_url, download=True)
+                title = info.get("title") if info else None
+        except yt_dlp.utils.DownloadError as e:
             raise HTTPException(
-                status_code=422, detail="No downloadable video/audio stream found for this URL")
+                status_code=422, detail=f"Failed to download YouTube video: {e}")
 
-        video_path = video_stream.download(
-            output_path=str(base_dir), filename="video.mp4")
-        audio_path = audio_stream.download(
-            output_path=str(base_dir), filename="audio.mp4")
-
-        merged_path = base_dir / "original.mp4"
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", video_path, "-i", audio_path,
-                 "-c:v", "copy", "-c:a", "aac", str(merged_path)],
-                check=True, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
+        merged_candidates = sorted(base_dir.glob("original.*"))
+        if not merged_candidates:
             raise HTTPException(
-                status_code=500, detail=f"Failed to merge video/audio streams: {e.stderr}")
+                status_code=500, detail="Download completed but no output file was found")
+        merged_path = merged_candidates[0]
 
         try:
             s3_client = boto3.client("s3")
@@ -89,7 +90,7 @@ def download_youtube_video(request: YoutubeDownloadRequest, token: HTTPAuthoriza
             raise HTTPException(
                 status_code=502, detail=f"Failed to upload video to S3: {e}")
 
-        return {"success": True, "s3_key": request.s3_key, "title": yt.title}
+        return {"success": True, "s3_key": request.s3_key, "title": title}
     finally:
         if base_dir.exists():
             shutil.rmtree(base_dir, ignore_errors=True)
