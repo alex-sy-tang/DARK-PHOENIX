@@ -5,7 +5,10 @@ import { db } from "~/server/db";
 
 // The YouTube ingestion action on this page runs a background download
 // (via next/server's after()) that can take well past a typical request.
-export const maxDuration = 800;
+// 300s is the Vercel Hobby plan ceiling; longer source videos may exceed
+// this window and the job will be left stuck in "downloading" -- documented
+// as a known limitation until the project is on a higher plan.
+export const maxDuration = 300;
 
 export default async function DashboardPage() {
   const session = await auth();

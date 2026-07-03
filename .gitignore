@@ -53,3 +53,5 @@ ai-podcast-clipper-backend/*.env
 ai-podcast-clipper-backend/.env
 ai-podcast-clipper-backend/.modal*
 ai-podcast-clipper-backend/brca1_analysis_plot.png
+.vercel
+.env*
