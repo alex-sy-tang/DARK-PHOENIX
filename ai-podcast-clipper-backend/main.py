@@ -27,6 +27,7 @@ import youtube_download
 
 class ProcessVideoRequest(BaseModel):
     s3_key: str
+    source_url: str | None = None
 
 
 image = (modal.Image.from_registry(
@@ -252,74 +253,114 @@ def create_subtitles_with_ffmpeg(transcript_segments: list, clip_start: float, c
     subprocess.run(ffmpeg_cmd, shell=True, check=True)
 
 
-def process_clip(base_dir: str, original_video_path: str, s3_key: str, start_time: float, end_time: float, clip_index: int, transcript_segments: list):
+def add_watermark_with_ffmpeg(input_path: str, output_path: str, text: str = "LUNARTECH.AI"):
+    # drawtext burned in after captions, upper-right corner: captions are
+    # bottom-anchored (alignment=2 in create_subtitles_with_ffmpeg) and the
+    # active speaker stays roughly centered after vertical reframing, so
+    # upper-right avoids overlapping either. fontsize=42 on a 1080px-wide
+    # output is ~3.9% of width, matching the "3-5% of video width" guidance.
+    ffmpeg_cmd = (
+        f"ffmpeg -y -i {input_path} "
+        f"-vf \"drawtext=fontfile=/usr/share/fonts/truetype/custom/Anton-Regular.ttf:"
+        f"text='{text}':fontsize=42:fontcolor=white@0.85:"
+        f"shadowcolor=black@0.6:shadowx=2:shadowy=2:x=w-tw-40:y=40\" "
+        f"-c:v h264 -preset fast -crf 23 -c:a copy {output_path}"
+    )
+    subprocess.run(ffmpeg_cmd, shell=True, check=True)
+
+
+def process_clip(base_dir: str, original_video_path: str, s3_key: str, start_time: float, end_time: float, clip_index: int, transcript_segments: list, source_url: str | None = None) -> dict:
     clip_name = f"clip_{clip_index}"
     s3_key_dir = os.path.dirname(s3_key)
     output_s3_key = f"{s3_key_dir}/{clip_name}.mp4"
     print(f"Output S3 key: {output_s3_key}")
 
-    clip_dir = base_dir / clip_name
-    clip_dir.mkdir(parents=True, exist_ok=True)
-
-    clip_segment_path = clip_dir / f"{clip_name}_segment.mp4"
-    vertical_mp4_path = clip_dir / "pyavi" / "video_out_vertical.mp4"
-    subtitle_output_path = clip_dir / "pyavi" / "video_with_subtitles.mp4"
-
-    (clip_dir / "pywork").mkdir(exist_ok=True)
-    pyframes_path = clip_dir / "pyframes"
-    pyavi_path = clip_dir / "pyavi"
-    audio_path = clip_dir / "pyavi" / "audio.wav"
-
-    pyframes_path.mkdir(exist_ok=True)
-    pyavi_path.mkdir(exist_ok=True)
-
     duration = end_time - start_time
-    cut_command = (f"ffmpeg -i {original_video_path} -ss {start_time} -t {duration} "
-                   f"{clip_segment_path}")
-    subprocess.run(cut_command, shell=True, check=True,
-                   capture_output=True, text=True)
+    manifest_entry = {
+        "clip_filename": f"{clip_name}.mp4",
+        "source_url": source_url,
+        "start_time": start_time,
+        "end_time": end_time,
+        "duration": duration,
+        "s3_key": None,
+        "watermark_present": False,
+        "captions_present": False,
+        "issue": None,
+    }
 
-    extract_cmd = f"ffmpeg -i {clip_segment_path} -vn -acodec pcm_s16le -ar 16000 -ac 1 {audio_path}"
-    subprocess.run(extract_cmd, shell=True,
-                   check=True, capture_output=True)
+    try:
+        clip_dir = base_dir / clip_name
+        clip_dir.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy(clip_segment_path, base_dir / f"{clip_name}.mp4")
+        clip_segment_path = clip_dir / f"{clip_name}_segment.mp4"
+        vertical_mp4_path = clip_dir / "pyavi" / "video_out_vertical.mp4"
+        subtitle_output_path = clip_dir / "pyavi" / "video_with_subtitles.mp4"
+        watermark_output_path = clip_dir / "pyavi" / "video_with_watermark.mp4"
 
-    columbia_command = (f"python demoTalkNet.py --videoName {clip_name} "
-                        f"--videoFolder {str(base_dir)} "
-                        f"--pretrainModel pretrain_TalkSet.model")
+        (clip_dir / "pywork").mkdir(exist_ok=True)
+        pyframes_path = clip_dir / "pyframes"
+        pyavi_path = clip_dir / "pyavi"
+        audio_path = clip_dir / "pyavi" / "audio.wav"
 
-    columbia_start_time = time.time()
-    subprocess.run(columbia_command, cwd="/asd", shell=True)
-    columbia_end_time = time.time()
-    print(
-        f"Columbia script completed in {columbia_end_time - columbia_start_time:.2f} seconds")
+        pyframes_path.mkdir(exist_ok=True)
+        pyavi_path.mkdir(exist_ok=True)
 
-    tracks_path = clip_dir / "pywork" / "tracks.pckl"
-    scores_path = clip_dir / "pywork" / "scores.pckl"
-    if not tracks_path.exists() or not scores_path.exists():
-        raise FileNotFoundError("Tracks or scores not found for clip")
+        cut_command = (f"ffmpeg -i {original_video_path} -ss {start_time} -t {duration} "
+                       f"{clip_segment_path}")
+        subprocess.run(cut_command, shell=True, check=True,
+                       capture_output=True, text=True)
 
-    with open(tracks_path, "rb") as f:
-        tracks = pickle.load(f)
+        extract_cmd = f"ffmpeg -i {clip_segment_path} -vn -acodec pcm_s16le -ar 16000 -ac 1 {audio_path}"
+        subprocess.run(extract_cmd, shell=True,
+                       check=True, capture_output=True)
 
-    with open(scores_path, "rb") as f:
-        scores = pickle.load(f)
+        shutil.copy(clip_segment_path, base_dir / f"{clip_name}.mp4")
 
-    cvv_start_time = time.time()
-    create_vertical_video(
-        tracks, scores, pyframes_path, pyavi_path, audio_path, vertical_mp4_path
-    )
-    cvv_end_time = time.time()
-    print(
-        f"Clip {clip_index} vertical video creation time: {cvv_end_time - cvv_start_time:.2f} seconds")
+        columbia_command = (f"python demoTalkNet.py --videoName {clip_name} "
+                            f"--videoFolder {str(base_dir)} "
+                            f"--pretrainModel pretrain_TalkSet.model")
 
-    create_subtitles_with_ffmpeg(transcript_segments, start_time,
-                                 end_time, vertical_mp4_path, subtitle_output_path, max_words=5)
+        columbia_start_time = time.time()
+        subprocess.run(columbia_command, cwd="/asd", shell=True)
+        columbia_end_time = time.time()
+        print(
+            f"Columbia script completed in {columbia_end_time - columbia_start_time:.2f} seconds")
 
-    s3_client = boto3.client("s3")
-    s3_client.upload_file(
-        subtitle_output_path, os.environ["S3_BUCKET_NAME"], output_s3_key)
+        tracks_path = clip_dir / "pywork" / "tracks.pckl"
+        scores_path = clip_dir / "pywork" / "scores.pckl"
+        if not tracks_path.exists() or not scores_path.exists():
+            raise FileNotFoundError("Tracks or scores not found for clip")
+
+        with open(tracks_path, "rb") as f:
+            tracks = pickle.load(f)
+
+        with open(scores_path, "rb") as f:
+            scores = pickle.load(f)
+
+        cvv_start_time = time.time()
+        create_vertical_video(
+            tracks, scores, pyframes_path, pyavi_path, audio_path, vertical_mp4_path
+        )
+        cvv_end_time = time.time()
+        print(
+            f"Clip {clip_index} vertical video creation time: {cvv_end_time - cvv_start_time:.2f} seconds")
+
+        create_subtitles_with_ffmpeg(transcript_segments, start_time,
+                                     end_time, vertical_mp4_path, subtitle_output_path, max_words=5)
+        manifest_entry["captions_present"] = True
+
+        add_watermark_with_ffmpeg(subtitle_output_path, watermark_output_path)
+        manifest_entry["watermark_present"] = True
+
+        s3_client = boto3.client("s3")
+        s3_client.upload_file(
+            watermark_output_path, os.environ["S3_BUCKET_NAME"], output_s3_key)
+        manifest_entry["s3_key"] = output_s3_key
+    except Exception as e:
+        print(f"Clip {clip_index} failed: {e}")
+        manifest_entry["issue"] = str(e)
+
+    return manifest_entry
 
 
 @app.cls(gpu="L40S", timeout=3600, retries=0, scaledown_window=20, secrets=[modal.Secret.from_name("ai-podcast-clipper-secret")], volumes={mount_path: volume})
@@ -445,12 +486,22 @@ class AiPodcastClipper:
         print(clip_moments)
 
         # 3. Process clips
+        manifest_entries = []
         for index, moment in enumerate(clip_moments[:5]):
             if "start" in moment and "end" in moment:
                 print("Processing clip" + str(index) + " from " +
                       str(moment["start"]) + " to " + str(moment["end"]))
-                process_clip(base_dir, video_path, s3_key,
-                             moment["start"], moment["end"], index, transcript_segments)
+                manifest_entries.append(process_clip(
+                    base_dir, video_path, s3_key, moment["start"], moment["end"],
+                    index, transcript_segments, request.source_url))
+
+        # 4. Upload clips_manifest.json alongside the clips
+        manifest_path = base_dir / "clips_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest_entries, f, indent=2)
+        manifest_s3_key = f"{os.path.dirname(s3_key)}/clips_manifest.json"
+        s3_client.upload_file(
+            str(manifest_path), os.environ["S3_BUCKET_NAME"], manifest_s3_key)
 
         if base_dir.exists():
             print(f"Cleaning up temp dir after {base_dir}")
